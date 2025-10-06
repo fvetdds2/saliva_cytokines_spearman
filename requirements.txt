@@ -1,0 +1,16 @@
+streamlit
+pandas
+openpyxl
+qrcode
+streamlit-webrtc
+opencv-python-headless
+pyzbar
+xlsxWriter
+datetime
+numpy
+pathlib
+io
+zipfile
+matplotlib
+spearmanr
+
