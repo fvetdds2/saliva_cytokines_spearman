@@ -1,19 +1,18 @@
 # streamlit_app.py
-# Complete app: upload or auto-load UO1_149.xlsx, compute Spearman (SFR_1 vs cytokines from BJ onward) by Group_ID
-# Dependencies: streamlit, pandas, numpy, openpyxl, matplotlib, scipy
+# Option B: open ExcelFile directly (no caching)
+# Computes Spearman correlations: SFR_1 vs cytokines (from Excel column BJ onward), split by Group_ID
 
 import io
 from pathlib import Path
 import zipfile
-
 import numpy as np
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 
-# Prefer SciPy for exact Spearman; fall back to a light implementation if missing
+# Prefer SciPy for exact Spearman; fall back if missing
 try:
-    from scipy.stats import spearmanr, t as student_t  # spearmanr for rho & p-value
+    from scipy.stats import spearmanr
     HAVE_SCIPY = True
 except Exception:
     HAVE_SCIPY = False
@@ -33,16 +32,15 @@ def excel_col_to_index(label: str) -> int:
 
 def p_adjust(pvals: np.ndarray, method: str = "fdr_bh") -> np.ndarray:
     """
-    Multiple-testing correction.
-    Supported: 'fdr_bh' (Benjamini–Hochberg), 'bonferroni', 'holm', 'fdr_by'.
-    Returns adjusted p-values. NaNs are preserved.
+    Multiple-testing correction. Supported:
+    'fdr_bh' (BH/FDR), 'bonferroni', 'holm', 'fdr_by'.
     """
     p = np.asarray(pvals, dtype=float)
     q = np.full_like(p, np.nan, dtype=float)
-    mask = np.isfinite(p)
-    if mask.sum() == 0:
+    msk = np.isfinite(p)
+    if msk.sum() == 0:
         return q
-    pv = p[mask]
+    pv = p[msk]
     m = pv.size
     order = np.argsort(pv)
     pv_sorted = pv[order]
@@ -50,7 +48,6 @@ def p_adjust(pvals: np.ndarray, method: str = "fdr_bh") -> np.ndarray:
     if method == "bonferroni":
         q_sorted = np.minimum(pv_sorted * m, 1.0)
     elif method == "holm":
-        # Holm–Bonferroni (step-down)
         q_sorted = np.minimum.accumulate((pv_sorted[::-1] * np.arange(1, m + 1))[::-1])
         q_sorted = np.minimum(q_sorted, 1.0)
     elif method == "fdr_bh":
@@ -67,13 +64,13 @@ def p_adjust(pvals: np.ndarray, method: str = "fdr_bh") -> np.ndarray:
     else:
         raise ValueError(f"Unknown method '{method}'")
 
-    q_vals = np.full_like(p, np.nan, dtype=float)
-    q_vals_idx = np.where(mask)[0][order]
-    q_vals[q_vals_idx] = q_sorted
-    return q_vals
+    out = np.full_like(p, np.nan, dtype=float)
+    out_idx = np.where(msk)[0][order]
+    out[out_idx] = q_sorted
+    return out
 
 def _rankdata(a: np.ndarray) -> np.ndarray:
-    """Average ranks for ties (fallback if SciPy not available)."""
+    """Average ranks for ties (fallback if SciPy missing)."""
     a = np.asarray(a, dtype=float)
     n = a.size
     order = np.argsort(a, kind="mergesort")
@@ -92,8 +89,6 @@ def _rankdata(a: np.ndarray) -> np.ndarray:
     return ranks
 
 def _pearsonr(x: np.ndarray, y: np.ndarray) -> float:
-    x = np.asarray(x, dtype=float)
-    y = np.asarray(y, dtype=float)
     x = x - x.mean()
     y = y - y.mean()
     denom = np.sqrt((x * x).sum() * (y * y).sum())
@@ -102,23 +97,18 @@ def _pearsonr(x: np.ndarray, y: np.ndarray) -> float:
     return float((x * y).sum() / denom)
 
 def _spearman_no_scipy(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
-    """Spearman rho from rank correlation; p via normal approx (n>=10)."""
+    """Spearman rho via rank correlation; p-value via normal approx (n>=10)."""
     n = x.size
     if n < 3:
         return (np.nan, np.nan)
-    rx = _rankdata(x)
-    ry = _rankdata(y)
+    rx, ry = _rankdata(x), _rankdata(y)
     rho = _pearsonr(rx, ry)
     if np.isnan(rho) or n < 10:
         return (rho, np.nan)
     z = rho * np.sqrt(n - 1)
-    # two-sided p ~ N(0,1/(n-1)); use erfc for tails
+    # two-sided p from normal tail
     p = float(np.math.erfc(abs(z) / np.sqrt(2.0)))
     return (rho, p)
-
-@st.cache_data(show_spinner=False)
-def load_excel(file_bytes) -> pd.ExcelFile:
-    return pd.ExcelFile(file_bytes, engine="openpyxl")
 
 def compute_spearman_by_group(
     df: pd.DataFrame,
@@ -127,24 +117,21 @@ def compute_spearman_by_group(
     start_col_label: str = "BJ",
     fdr_method: str = "fdr_bh"
 ) -> tuple[pd.DataFrame, list[str]]:
-    # Checks
+    # basic checks
     for col in (group_col, target_col):
         if col not in df.columns:
-            raise ValueError(f"Required column '{col}' not found in data.")
+            raise ValueError(f"Required column '{col}' not found.")
 
-    # Identify cytokines from start_col to end
+    # identify cytokine columns from BJ onward
     start_idx = excel_col_to_index(start_col_label)
     if start_idx >= len(df.columns):
-        raise ValueError(
-            f"Start column '{start_col_label}' (index {start_idx}) is beyond the last column ({len(df.columns)-1})."
-        )
+        raise ValueError(f"Start column '{start_col_label}' (index {start_idx}) is beyond last column.")
     candidate_cols = list(df.columns[start_idx:])
     numeric_mask = df[candidate_cols].apply(pd.to_numeric, errors="coerce").notna().any(axis=0)
     cytokine_cols = [c for c in candidate_cols if bool(numeric_mask.get(c, False))]
     if not cytokine_cols:
         raise ValueError(f"No numeric cytokine columns found from '{start_col_label}' onward.")
 
-    # Ensure target numeric
     df = df.copy()
     df[target_col] = pd.to_numeric(df[target_col], errors="coerce")
 
@@ -168,7 +155,7 @@ def compute_spearman_by_group(
 
     res = pd.DataFrame(rows)
 
-    # Multiple-testing within each group
+    # adjust p-values within each group
     def add_adj(sub: pd.DataFrame) -> pd.DataFrame:
         sub = sub.copy()
         sub["q_value"] = p_adjust(sub["p_value"].values, method=fdr_method)
@@ -179,7 +166,7 @@ def compute_spearman_by_group(
     return res, cytokine_cols
 
 def make_group_heatmap(df_group: pd.DataFrame, target_col: str, group_value) -> io.BytesIO:
-    """Return a PNG image buffer for the group's rho heatmap."""
+    """Return a PNG buffer for the group's rho heatmap."""
     pivot = df_group.set_index("Cytokine")["Spearman_rho"].to_frame()
     fig, ax = plt.subplots(figsize=(6, max(3, 0.25 * len(pivot))))
     im = ax.imshow(pivot.values, aspect="auto")
@@ -208,12 +195,9 @@ with st.sidebar:
     group_col = st.text_input("Group column", value="Group_ID")
     target_col = st.text_input("Target column", value="SFR_1")
     start_col_label = st.text_input("Start cytokine column (Excel letter)", value="BJ")
-    fdr_method = st.selectbox(
-        "Multiple testing correction",
-        ["fdr_bh", "bonferroni", "holm", "fdr_by"],
-        index=0
-    )
-    show_top_n = st.number_input("Top hits per group to display", min_value=1, max_value=100, value=10, step=1)
+    fdr_method = st.selectbox("Multiple testing correction",
+                              ["fdr_bh", "bonferroni", "holm", "fdr_by"], index=0)
+    show_top_n = st.number_input("Top hits per group", min_value=1, max_value=100, value=10, step=1)
 
 # Prefer a local default file if present
 default_candidates = [Path("UO1_149.xlsx"), Path("/mnt/data/UO1_149.xlsx")]
@@ -226,9 +210,9 @@ source = st.radio(
     horizontal=True
 )
 
-file_bytes = None
+file_bytes: bytes | None = None
 if source == "Use local UO1_149.xlsx":
-    if not existing_default:
+    if existing_default is None:
         st.warning("Couldn't find **UO1_149.xlsx**. Please upload a file instead.")
         source = "Upload Excel"
     else:
@@ -243,9 +227,9 @@ if file_bytes is None:
     st.info("Provide an Excel file to begin.")
     st.stop()
 
-# Load workbook & pick sheet
+# ---- OPTION B: open ExcelFile directly (no caching) ----
 try:
-    xl = load_excel(io.BytesIO(file_bytes))
+    xl = pd.ExcelFile(io.BytesIO(file_bytes), engine="openpyxl")
 except Exception as e:
     st.error(f"Could not read Excel file: {e}")
     st.stop()
@@ -272,9 +256,8 @@ if st.button("Run Spearman analysis", type="primary"):
         st.error(str(e))
         st.stop()
 
-    st.success(f"Done. Detected {len(cytokine_cols)} cytokine columns starting from '{start_col_label}'.")
+    st.success(f"Detected {len(cytokine_cols)} cytokine columns starting from '{start_col_label}'.")
 
-    # Results table
     st.subheader("All results")
     st.dataframe(
         results.sort_values(["Group_ID", "q_value", "p_value"], na_position="last"),
@@ -291,7 +274,7 @@ if st.button("Run Spearman analysis", type="primary"):
         mime="text/csv",
     )
 
-    # Top hits
+    # Top hits per group
     st.subheader(f"Top {show_top_n} associations per group (by q-value, then p-value)")
     top = (
         results.dropna(subset=["q_value"])
@@ -320,9 +303,9 @@ if st.button("Run Spearman analysis", type="primary"):
 with st.expander("Notes & assumptions"):
     st.markdown(
         """
-- Treats everything from Excel column **BJ** to the end as cytokines; non-numeric columns are ignored.
-- Computes **Spearman correlation** between `SFR_1` and each cytokine **within each `Group_ID`** using pairwise complete observations.
-- Multiple-testing correction is applied **within each group** (BH/FDR by default).
-- Requires at least **N ≥ 3** pairwise non-missing samples to compute a correlation; otherwise ρ and *p* are reported as NaN.
+- From Excel column **BJ** to the end is treated as cytokines; non-numeric columns are ignored automatically.
+- Spearman correlation per **Group_ID** against **SFR_1** using pairwise complete observations.
+- Multiple-testing correction applied **within each group** (BH/FDR default).
+- Requires **N ≥ 3** pairwise non-missing samples to compute a correlation; otherwise ρ and *p* are NaN.
 """
     )
