@@ -183,7 +183,7 @@ def make_group_heatmap(df_group: pd.DataFrame, target_col: str, group_value) -> 
 # UI
 # -------------------------------
 st.set_page_config(page_title="Spearman Correlations by Group", layout="wide")
-st.title("Spearman Correlation: SFR_1 vs Cytokines (from Excel column BJ onward) by Group")
+st.title("Spearman Correlation: Salivary flow rate vs Cytokines by Group")
 
 with st.sidebar:
     st.header("Settings")
