@@ -1,7 +1,3 @@
-# streamlit_app.py
-# Option B: open ExcelFile directly (no caching)
-# Computes Spearman correlations: SFR_1 vs cytokines (from Excel column BJ onward), split by Group_ID
-
 import io
 from pathlib import Path
 import zipfile
@@ -10,7 +6,6 @@ import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 
-# Prefer SciPy for exact Spearman; fall back if missing
 try:
     from scipy.stats import spearmanr
     HAVE_SCIPY = True
@@ -227,7 +222,7 @@ if file_bytes is None:
     st.info("Provide an Excel file to begin.")
     st.stop()
 
-# ---- OPTION B: open ExcelFile directly (no caching) ----
+# ---- OPTION B: 
 try:
     xl = pd.ExcelFile(io.BytesIO(file_bytes), engine="openpyxl")
 except Exception as e:
